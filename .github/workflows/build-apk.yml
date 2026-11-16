@@ -40,7 +40,7 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
-      - name: Find or extract the Android project
+      - name: Find the latest source archive or existing project
         shell: bash
         run: |
           set -euo pipefail
@@ -50,7 +50,6 @@ jobs:
             while IFS= read -r -d '' settings_file; do
               local candidate
               candidate="$(dirname "$settings_file")"
-
               if [[ -f "$candidate/app/build.gradle.kts" || -f "$candidate/app/build.gradle" ]] \
                  && [[ -f "$candidate/app/src/main/AndroidManifest.xml" ]]; then
                 realpath "$candidate"
@@ -65,54 +64,39 @@ jobs:
           }
 
           PROJECT_DIR=""
+          ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 5 -type f -iname 'ManagerMan*.zip' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2- || true)"
 
-          # First search all folders in the checked-out repository.
-          if PROJECT_DIR="$(find_project "$GITHUB_WORKSPACE")"; then
-            echo "Found Android project at: $PROJECT_DIR"
-          else
-            echo "No extracted Gradle project found. Searching for a ManagerMan source ZIP..."
-
+          # Prefer the newest ManagerMan source archive so older checked-in copies cannot override it.
+          if [[ -n "$ZIP_FILE" ]]; then
             EXTRACT_DIR="$RUNNER_TEMP/managerman-source"
             mkdir -p "$EXTRACT_DIR"
-            ZIP_FOUND="false"
+            echo "Extracting newest source archive: $ZIP_FILE"
+            unzip -oq "$ZIP_FILE" -d "$EXTRACT_DIR"
+            PROJECT_DIR="$(find_project "$EXTRACT_DIR" || true)"
+          fi
 
-            while IFS= read -r -d '' archive; do
-              ZIP_FOUND="true"
-              destination="$EXTRACT_DIR/$(basename "${archive%.zip}")"
-              mkdir -p "$destination"
-              echo "Extracting: $archive"
-              unzip -oq "$archive" -d "$destination"
-            done < <(
-              find "$GITHUB_WORKSPACE" -maxdepth 5 -type f \
-                \( -iname 'ManagerMan*.zip' -o -iname '*ManagerMan*Source*.zip' \) -print0
-            )
-
-            if [[ "$ZIP_FOUND" == "true" ]]; then
-              if PROJECT_DIR="$(find_project "$EXTRACT_DIR")"; then
-                echo "Found Android project inside source archive at: $PROJECT_DIR"
-              fi
-            fi
+          # If no source archive is present, build an already-extracted project.
+          if [[ -z "$PROJECT_DIR" ]]; then
+            PROJECT_DIR="$(find_project "$GITHUB_WORKSPACE" || true)"
           fi
 
           if [[ -z "$PROJECT_DIR" ]]; then
-            echo "::error::Android project not found. Extract the ManagerMan source ZIP into the repository, or commit the ZIP using a filename beginning with ManagerMan."
-            echo "Repository files (first four levels):"
-            find "$GITHUB_WORKSPACE" -maxdepth 4 -type f | sort | head -200
+            echo "::error::Android project not found. Upload the newest ManagerMan source ZIP to the repository root, or commit the extracted Android project."
+            find "$GITHUB_WORKSPACE" -maxdepth 5 -type f | sort | head -200
             exit 1
           fi
 
+          echo "Building Android project at: $PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Verify Android project
+      - name: Verify project files
         shell: bash
         run: |
           set -euo pipefail
-          echo "Building project from: $PROJECT_DIR"
+          test -f "$PROJECT_DIR/settings.gradle.kts" || test -f "$PROJECT_DIR/settings.gradle"
+          test -f "$PROJECT_DIR/build.gradle.kts" || test -f "$PROJECT_DIR/build.gradle"
+          test -f "$PROJECT_DIR/app/build.gradle.kts" || test -f "$PROJECT_DIR/app/build.gradle"
           test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
-          if [[ ! -f "$PROJECT_DIR/settings.gradle.kts" && ! -f "$PROJECT_DIR/settings.gradle" ]]; then
-            echo "::error::Gradle settings file missing from $PROJECT_DIR"
-            exit 1
-          fi
 
       - name: Build Debug APK
         run: gradle -p "$PROJECT_DIR" :app:assembleDebug --no-daemon --stacktrace
@@ -120,7 +104,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ManagerMan-debug-APK
+          name: ManagerMan-v0.2.1-debug-APK
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
